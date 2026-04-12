@@ -109,24 +109,26 @@ class ViglooBot:
                     
                     file_path = os.path.join(temp_dir, f"S{season_num}E{ep_num}.mp4")
                     
-                    # Global Progress Callback
+                    # Dashboard Callback
                     async def progress_cb(ep_percent, current_sec, total_sec):
                         global_percent = ((i - 1) + (ep_percent / 100)) / total_eps * 100
                         
                         eta_str = "Calculating..."
                         elapsed = time.time() - pipeline_start_time
-                        if global_percent > 0.1: # Show ETA earlier
+                        if global_percent > 0.1:
                             total_est = elapsed * (100 / global_percent)
                             rem_sec = max(0, total_est - elapsed)
-                            
                             hours = int(rem_sec // 3600)
                             mins = int((rem_sec % 3600) // 60)
                             secs = int(rem_sec % 60)
                             eta_str = f"{hours}h {mins}m {secs}s" if hours > 0 else f"{mins}m {secs}s"
                         
+                        # Labels based on hardsub status
+                        status_label = "**Download & Burning Hardsub...**" if ep_percent > 0 else "**Preparing Download...**"
+                        
                         dashboard = (
                             f"🎬 **{drama_title}**\n"
-                            f"🔥 Status: **Burning Hardsub...**\n"
+                            f"🔥 Status: {status_label}\n"
                             f"🎞 Episode {i}/{total_eps}\n"
                             f"`{get_bar(global_percent)}`\n"
                             f"⏳ Estimasi Selesai: `{eta_str}`"
@@ -135,19 +137,17 @@ class ViglooBot:
 
                     success = await downloader.download_file(stream_res, file_path, progress_cb)
                     if not success:
-                        await update_status(f"❌ **Pipeline Aborted: Download failed for Ep {ep_num} in {drama_title}**")
                         all_downloaded = False; break
                     
                     downloaded_files.append(file_path)
 
                 if not all_downloaded or not downloaded_files:
+                    await update_status(f"❌ **Failed to process {drama_title}**")
                     return False
 
                 # 4. Merge
-                await update_status(f"🎬 **{drama_title}**\n🔥 Status: **Merging Episodes...**\n🎞 Total: {total_eps} Episode")
                 output_filename = f"{drama_title} - Season {season_num}.mp4"
                 output_path = os.path.join(OUTPUT_DIR, output_filename)
-                
                 merge_success = merger.merge_videos(downloaded_files, output_path)
                 
                 if merge_success:
@@ -157,7 +157,7 @@ class ViglooBot:
                         dashboard = (
                             f"🎬 **{drama_title}**\n"
                             f"🔥 Status: **Uploading to Telegram...**\n"
-                            f"{get_bar(pct)}"
+                            f"`{get_bar(pct)}`"
                         )
                         await update_status(dashboard)
 
