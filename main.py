@@ -226,9 +226,17 @@ class ViglooBot:
                 if process.returncode != 0:
                     return await event.respond(f"❌ **Git Pull Failed:**\n`{process.stderr}`")
                 
-                await event.respond("✅ **Code updated!** Restarting bot... 🚀")
+                await event.respond("✅ **Code updated!** Cleaning session and restarting bot... 🚀")
                 
-                # 2. Self Restart
+                # 2. Cleanup & Restart
+                await uploader.client.disconnect()
+                
+                # Remove session files for a clean start
+                import glob
+                for f in glob.glob("*.session"):
+                    try: os.remove(f)
+                    except: pass
+                
                 os.execv(sys.executable, ['python'] + sys.argv)
             except Exception as e:
                 await event.respond(f"❌ **Update Error:** {e}")
