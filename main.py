@@ -45,40 +45,36 @@ class ViglooBot:
             self._save_processed()
 
     async def run_pipeline(self, drama_id, chat_id=None, topic_id=None):
-        """Standard pipeline with LIVE DASHBOARD"""
+        """Pipeline with CLEAN DASHBOARD (Only during active processing)"""
         if chat_id is None:
             chat_id = AUTO_CHANNEL if AUTO_CHANNEL != 0 else ADMIN_ID
             
-        logger.info(f"Starting pipeline for Drama ID: {drama_id} to Chat: {chat_id}")
-        
-        # 0. Initial Status Message
-        status_msg = await uploader.client.send_message(chat_id, "🎬 **Preparing Drama...**", reply_to=topic_id)
-        
+        logger.info(f"Starting pipeline for Drama ID: {drama_id}")
+        status_msg = None
+
         def get_bar(percent):
-            # 20 block resolution for smoother progress
             blocks = 20
             done = int((percent / 100) * blocks)
             return f"|{'■' * done}{'□' * (blocks - done)}| {percent:.1f}%"
 
         async def update_status(text):
-            try: await uploader.client.edit_message(chat_id, status_msg, text)
+            nonlocal status_msg
+            try:
+                if status_msg is None:
+                    status_msg = await uploader.client.send_message(chat_id, text, reply_to=topic_id)
+                else:
+                    await uploader.client.edit_message(chat_id, status_msg, text)
             except: pass
 
         try:
-            # 1. Scraping Detail
-            await update_status(f"🎬 **Fetching Details (ID: {drama_id})...**")
+            # 1. Scraping Detail (No Message Yet)
             res = await vigloo_api.get_drama_detail(drama_id)
-            if not res or not res.get("success"):
-                await update_status(f"❌ **Failed to fetch details for {drama_id}**")
-                return False
+            if not res or not res.get("success"): return False
             
             detail = res.get("data", {}).get("payload", {})
             drama_title = detail.get("title", f"Drama_{drama_id}")
             seasons = detail.get("seasons", [])
-            
-            if not seasons:
-                await update_status(f"❌ **No seasons found for {drama_title}**")
-                return False
+            if not seasons: return False
 
             temp_dir = os.path.join(DOWNLOAD_DIR, str(drama_id))
             os.makedirs(temp_dir, exist_ok=True)
@@ -86,9 +82,6 @@ class ViglooBot:
             for season in seasons:
                 season_id = season.get("id")
                 season_num = season.get("seasonNumber", 1)
-                
-                # 2. Episode Fetch
-                await update_status(f"🎬 **{drama_title}**\n🔥 Status: Fetching Episodes...")
                 res_eps = await vigloo_api.get_episodes(drama_id, season_id)
                 if not res_eps or not res_eps.get("success"): continue
                 
@@ -102,33 +95,25 @@ class ViglooBot:
                 for i, ep in enumerate(episodes, 1):
                     ep_num = ep.get("episodeNumber")
                     video_id = ep.get("id")
-                    
                     stream_res = await vigloo_api.get_stream(season_id, ep_num, video_id)
                     if not stream_res or not stream_res.get("success"):
                         all_downloaded = False; break
                     
                     file_path = os.path.join(temp_dir, f"S{season_num}E{ep_num}.mp4")
                     
-                    # Dashboard Callback
                     async def progress_cb(ep_percent, current_sec, total_sec):
                         global_percent = ((i - 1) + (ep_percent / 100)) / total_eps * 100
-                        
                         eta_str = "Calculating..."
                         elapsed = time.time() - pipeline_start_time
                         if global_percent > 0.1:
-                            total_est = elapsed * (100 / global_percent)
-                            rem_sec = max(0, total_est - elapsed)
-                            hours = int(rem_sec // 3600)
-                            mins = int((rem_sec % 3600) // 60)
-                            secs = int(rem_sec % 60)
+                            rem_sec = (elapsed * (100 / global_percent)) - elapsed
+                            hours, rem = divmod(int(rem_sec), 3600)
+                            mins, secs = divmod(rem, 60)
                             eta_str = f"{hours}h {mins}m {secs}s" if hours > 0 else f"{mins}m {secs}s"
-                        
-                        # Labels based on hardsub status
-                        status_label = "**Download & Burning Hardsub...**" if ep_percent > 0 else "**Preparing Download...**"
                         
                         dashboard = (
                             f"🎬 **{drama_title}**\n"
-                            f"🔥 Status: {status_label}\n"
+                            f"🔥 Status: **Download & Burning Hardsub...**\n"
                             f"🎞 Episode {i}/{total_eps}\n"
                             f"`{get_bar(global_percent)}`\n"
                             f"⏳ Estimasi Selesai: `{eta_str}`"
@@ -138,38 +123,34 @@ class ViglooBot:
                     success = await downloader.download_file(stream_res, file_path, progress_cb)
                     if not success:
                         all_downloaded = False; break
-                    
                     downloaded_files.append(file_path)
 
                 if not all_downloaded or not downloaded_files:
-                    await update_status(f"❌ **Failed to process {drama_title}**")
+                    if status_msg: await uploader.client.delete_messages(chat_id, status_msg)
                     return False
 
                 # 4. Merge
                 output_filename = f"{drama_title} - Season {season_num}.mp4"
                 output_path = os.path.join(OUTPUT_DIR, output_filename)
-                merge_success = merger.merge_videos(downloaded_files, output_path)
-                
-                if merge_success:
+                if merger.merge_videos(downloaded_files, output_path):
                     # 5. Upload
                     async def upload_cb(sent_bytes, total_bytes):
                         pct = (sent_bytes / total_bytes) * 100
-                        dashboard = (
-                            f"🎬 **{drama_title}**\n"
-                            f"🔥 Status: **Uploading to Telegram...**\n"
-                            f"`{get_bar(pct)}`"
-                        )
-                        await update_status(dashboard)
+                        await update_status(f"🎬 **{drama_title}**\n🔥 Status: **Uploading...**\n`{get_bar(pct)}`")
 
-                    caption = f"🎬 **{drama_title}**\n\nSeason: {season_num}\nStatus: Completed\n\n#Vigloo #Drama"
+                    caption = f"🎬 **{drama_title}**\n\nSeason: {season_num}\n#Vigloo #Drama"
                     await uploader.upload_video(chat_id, output_path, caption, topic_id, progress_callback=upload_cb)
-                    await update_status(f"✅ **{drama_title} Uploaded Successfully!**")
                     
+                    # Delete dashboard message after success
+                    if status_msg: await uploader.client.delete_messages(chat_id, status_msg)
                     if os.path.exists(output_path): os.remove(output_path)
 
             self.mark_processed(drama_id)
             return True
         finally:
+            if status_msg: 
+                try: await uploader.client.delete_messages(chat_id, status_msg)
+                except: pass
             if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 
     async def auto_scan_task(self):
