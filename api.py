@@ -14,21 +14,28 @@ class ViglooAPI:
         }
 
     async def _get(self, endpoint, additional_params=None):
-        # Enforce delay to prevent spamming
-        await asyncio.sleep(API_REQUEST_DELAY)
-        
         params = self.params.copy()
         if additional_params:
             params.update(additional_params)
         
         async with httpx.AsyncClient(timeout=30.0) as client:
-            try:
-                response = await client.get(f"{self.base_url}{endpoint}", params=params)
-                response.raise_for_status()
-                return response.json()
-            except Exception as e:
-                logger.error(f"API Error ({endpoint}): {e}")
-                return None
+            for attempt in range(3):
+                try:
+                    await asyncio.sleep(API_REQUEST_DELAY) # Avoid API spam
+                    response = await client.get(f"{self.base_url}{endpoint}", params=params)
+                    response.raise_for_status()
+                    return response.json()
+                except (httpx.HTTPStatusError, httpx.RequestError) as e:
+                    # Retry on 5xx errors or connectivity issues
+                    if attempt < 2 and (isinstance(e, httpx.RequestError) or (isinstance(e, httpx.HTTPStatusError) and e.response.status_code >= 500)):
+                        logger.warning(f"API Attempt {attempt+1} failed ({endpoint}), retrying in 5s: {e}")
+                        await asyncio.sleep(5)
+                        continue
+                    
+                    if not (isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 404):
+                        logger.error(f"API Error ({endpoint}): {e}")
+                    return None
+            return None
 
     async def fetch_browse(self, page=1):
         """Latest Drama"""
