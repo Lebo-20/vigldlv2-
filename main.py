@@ -22,6 +22,30 @@ class ViglooBot:
         self.processed_data = self._load_processed()
         self.auto_mode = True
         self.lock = asyncio.Lock()  # Ensure only one drama processed at a time
+        self.last_status_time = 0
+        self._check_lock()
+
+    def _check_lock(self):
+        """Prevent multiple instances of the bot from running"""
+        lock_file = "bot.lock"
+        if os.path.exists(lock_file):
+            try:
+                # On Windows, we can use try-except to check if file is held by another process
+                with open(lock_file, "w") as f:
+                    f.write(str(os.getpid()))
+            except IOError:
+                print("❌ ERROR: Another instance of the bot is already running!")
+                os._exit(1)
+        else:
+            with open(lock_file, "w") as f:
+                f.write(str(os.getpid()))
+            
+        import atexit
+        def cleanup():
+            if os.path.exists(lock_file):
+                try: os.remove(lock_file)
+                except: pass
+        atexit.register(cleanup)
 
     def _load_processed(self):
         if os.path.exists(PROCESSED_FILE):
@@ -59,15 +83,23 @@ class ViglooBot:
 
         async def update_status(text):
             nonlocal status_msg
+            current_time = time.time()
+            # Only update if enough time has passed to avoid Telegram ratelimits
+            if current_time - self.last_status_time < STATUS_UPDATE_INTERVAL:
+                return
+            
             try:
                 if status_msg is None:
                     status_msg = await uploader.client.send_message(chat_id, text, reply_to=topic_id)
                 else:
                     await uploader.client.edit_message(chat_id, status_msg, text)
-            except: pass
+                self.last_status_time = current_time
+            except Exception as e:
+                logger.debug(f"Status update failed: {e}")
 
         try:
-            # 1. Scraping Detail (No Message Yet)
+            # 1. Scraping Detail
+            await asyncio.sleep(API_REQUEST_DELAY)
             res = await vigloo_api.get_drama_detail(drama_id)
             if not res or not res.get("success"): return False
             
@@ -82,6 +114,7 @@ class ViglooBot:
             for season in seasons:
                 season_id = season.get("id")
                 season_num = season.get("seasonNumber", 1)
+                await asyncio.sleep(API_REQUEST_DELAY)
                 res_eps = await vigloo_api.get_episodes(drama_id, season_id)
                 if not res_eps or not res_eps.get("success"): continue
                 
@@ -89,45 +122,59 @@ class ViglooBot:
                 total_eps = len(episodes)
                 downloaded_files = []
                 
-                # 3. Stream & Download
-                all_downloaded = True
+                # 3. Stream & Download (Parallelized for Speed)
                 pipeline_start_time = time.time()
-                for i, ep in enumerate(episodes, 1):
+                episode_progress = {} # Track individual ep progress
+                
+                async def process_one_episode(idx, ep):
                     ep_num = ep.get("episodeNumber")
                     video_id = ep.get("id")
                     stream_res = await vigloo_api.get_stream(season_id, ep_num, video_id)
                     if not stream_res or not stream_res.get("success"):
-                        all_downloaded = False; break
+                        return None
                     
                     file_path = os.path.join(temp_dir, f"S{season_num}E{ep_num}.mp4")
                     
                     async def progress_cb(ep_percent, current_sec, total_sec):
-                        global_percent = ((i - 1) + (ep_percent / 100)) / total_eps * 100
-                        eta_str = "Calculating..."
+                        episode_progress[idx] = ep_percent
+                        # Update global status occasionally
+                        total_percent = sum(episode_progress.values()) / total_eps
+                        
                         elapsed = time.time() - pipeline_start_time
-                        if global_percent > 0.1:
-                            rem_sec = (elapsed * (100 / global_percent)) - elapsed
+                        if total_percent > 0.1:
+                            rem_sec = (elapsed * (100 / total_percent)) - elapsed
                             hours, rem = divmod(int(rem_sec), 3600)
                             mins, secs = divmod(rem, 60)
                             eta_str = f"{hours}h {mins}m {secs}s" if hours > 0 else f"{mins}m {secs}s"
-                        
+                        else:
+                            eta_str = "Calculating..."
+
+                        active_ep = max(episode_progress.keys()) if episode_progress else idx
                         dashboard = (
                             f"🎬 **{drama_title}**\n"
-                            f"🔥 Status: **Download & Burning Hardsub...**\n"
-                            f"🎞 Episode {i}/{total_eps}\n"
-                            f"`{get_bar(global_percent)}`\n"
-                            f"⏳ Estimasi Selesai: `{eta_str}`"
+                            f"🔥 Status: **Parallel Processing ({total_eps} Eps)...**\n"
+                            f"🎞 Progress: `{get_bar(total_percent)}`\n"
+                            f"⏳ Estimasi: `{eta_str}`"
                         )
                         await update_status(dashboard)
 
                     success = await downloader.download_file(stream_res, file_path, progress_cb)
-                    if not success:
-                        all_downloaded = False; break
-                    downloaded_files.append(file_path)
+                    if success:
+                        episode_progress[idx] = 100
+                        return file_path
+                    return None
 
-                if not all_downloaded or not downloaded_files:
+                tasks = [process_one_episode(i, ep) for i, ep in enumerate(episodes, 1)]
+                downloaded_files_results = await asyncio.gather(*tasks)
+                downloaded_files = [f for f in downloaded_files_results if f]
+                
+                if len(downloaded_files) < total_eps:
+                    logger.error(f"Some episodes failed for {drama_title}")
                     if status_msg: await uploader.client.delete_messages(chat_id, status_msg)
                     return False
+
+                # Sort downloaded files to ensure correct order
+                downloaded_files.sort()
 
                 # 4. Merge
                 output_filename = f"{drama_title} - Season {season_num}.mp4"
@@ -170,6 +217,7 @@ class ViglooBot:
                                 try:
                                     logger.info(f"Processing drama {drama_id} with 4h timeout...")
                                     await asyncio.wait_for(self.run_pipeline(drama_id), timeout=4*3600)
+                                    await asyncio.sleep(10) # Cooldown after successful processing
                                 except asyncio.TimeoutError:
                                     logger.error(f"Timeout: Drama {drama_id} took more than 4 hours.")
                                 except Exception as e:
@@ -186,12 +234,13 @@ class ViglooBot:
                                 try:
                                     logger.info(f"Processing drama {drama_id} with 4h timeout...")
                                     await asyncio.wait_for(self.run_pipeline(drama_id), timeout=4*3600)
+                                    await asyncio.sleep(10) # Cooldown after successful processing
                                 except asyncio.TimeoutError:
                                     logger.error(f"Timeout: Drama {drama_id} took more than 4 hours.")
                                 except Exception as e:
                                     logger.error(f"Pipeline failed for {drama_id}: {e}")
                 
-            await asyncio.sleep(600)
+            await asyncio.sleep(AUTO_SCAN_INTERVAL)
 
     async def start(self):
         await uploader.start()

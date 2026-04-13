@@ -27,7 +27,9 @@ LANG = "id"
 # Download & Merge Config
 DOWNLOAD_DIR = "downloads"
 OUTPUT_DIR = "output"
-MAX_CONCURRENT_DOWNLOADS = 5
+MAX_CONCURRENT_DOWNLOADS = 4 # Increased for speed
+API_REQUEST_DELAY = 1.0 # Faster API requests
+STATUS_UPDATE_INTERVAL = 4 # Balanced UI updates
 FFMPEG_PRESET = "ultrafast"  # default ultrafast
 FFMPEG_CRF = 23
 
@@ -42,7 +44,8 @@ SUB_OUTLINE = 1
 SUB_OFFSET = 90
 
 # Automation Config
-AUTO_SCAN_INTERVAL = 15 * 60  # 15 minutes in seconds
+AUTO_SCAN_INTERVAL = 15 * 60  # Back to 15 minutes for faster scanning
+EPISODE_COOLDOWN = 10 # Delay between processing different episodes (seconds)
 PROCESSED_FILE = "processed.json"
 
 # Watermark Config (Optional)

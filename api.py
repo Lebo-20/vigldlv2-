@@ -1,6 +1,7 @@
 import httpx
 import logging
-from config import BASE_URL, API_CODE, LANG
+import asyncio
+from config import BASE_URL, API_CODE, LANG, API_REQUEST_DELAY
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +14,9 @@ class ViglooAPI:
         }
 
     async def _get(self, endpoint, additional_params=None):
+        # Enforce delay to prevent spamming
+        await asyncio.sleep(API_REQUEST_DELAY)
+        
         params = self.params.copy()
         if additional_params:
             params.update(additional_params)

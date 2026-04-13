@@ -29,12 +29,16 @@ class Downloader:
             raw_path = dest_path + ".raw.mp4"
             srt_path = dest_path.replace(".mp4", ".srt")
             
+            from config import API_REQUEST_DELAY
+
             # --- STEP 1: DOWNLOAD RAW VIDEO ---
             logger.info(f"Step 1/3: Downloading Raw Video for {dest_path}")
+            if progress_callback: await progress_callback("DOWNLOAD_RAW", 0)
+            
             download_success = False
             for attempt in range(self.retry_count):
                 try:
-                    # We download raw with 'copy' to be fast and preserve quality for editing
+                    await asyncio.sleep(API_REQUEST_DELAY) # Avoid API spam
                     cmd = ['ffmpeg', '-y', '-user_agent', user_agent, '-headers', f"Cookie: {cookie_str}\r\n", '-i', m3u8_url, '-c', 'copy', '-bsf:a', 'aac_adtstoasc', raw_path]
                     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
                     await proc.wait()
@@ -42,15 +46,18 @@ class Downloader:
                         download_success = True; break
                 except Exception as e:
                     logger.warning(f"Raw Download Attempt {attempt+1} failed: {e}")
-                await asyncio.sleep(2)
+                await asyncio.sleep(5) # Cooldown before retry
             
             if not download_success: return False
 
             # --- STEP 2: ASSEMBLE SUBTITLES ---
             logger.info(f"Step 2/3: Assembling Subtitles for {dest_path}")
+            if progress_callback: await progress_callback("FETCH_SUB", 0)
+            
             has_sub = False
             try:
                 async with httpx.AsyncClient(headers={"User-Agent": user_agent}) as client:
+                    await asyncio.sleep(API_REQUEST_DELAY)
                     r = await client.get(m3u8_url, cookies=cookies_dict, timeout=10.0)
                     if r.status_code == 200:
                         lines = r.text.splitlines()
@@ -60,16 +67,19 @@ class Downloader:
                         
                         if sub_uri:
                             final_sub_url = sub_uri if sub_uri.startswith("http") else m3u8_url.rsplit("/", 1)[0] + "/" + sub_uri
+                            await asyncio.sleep(API_REQUEST_DELAY)
                             r_sub = await client.get(final_sub_url, cookies=cookies_dict, timeout=10.0)
                             if r_sub.status_code == 200:
                                 sub_lines = r_sub.text.splitlines()
                                 bin_content = b""
                                 base_sub_url = final_sub_url.rsplit("/", 1)[0] + "/"
                                 segments = [l for l in sub_lines if l and not l.startswith("#")]
-                                for s_line in segments:
+                                for s_idx, s_line in enumerate(segments):
+                                    if s_idx % 10 == 0: await asyncio.sleep(0.2) # Faster jitter for segments
                                     seg_url = s_line if s_line.startswith("http") else base_sub_url + s_line
                                     r_seg = await client.get(seg_url, cookies=cookies_dict, timeout=5.0)
-                                    if r_seg.status_code == 200: bin_content += r_seg.content
+                                    if r_seg.status_code == 200: 
+                                        bin_content += r_seg.content
                                 
                                 temp_bin = srt_path + ".tmp"
                                 with open(temp_bin, "wb") as f: f.write(bin_content)
@@ -83,6 +93,7 @@ class Downloader:
 
             # --- STEP 3: EDIT & HARDSUB ---
             logger.info(f"Step 3/3: Applying Edits & Hardsubbing for {dest_path}")
+            if progress_callback: await progress_callback("BURNING", 0)
             
             # Duration for progress
             total_duration = 0
@@ -94,45 +105,21 @@ class Downloader:
             except: pass
 
             try:
-                # Build filter pipeline
-                # 0:v is video
                 video_chain = f"scale=-2:'min({HARDSUB_MAX_RES},ih)'"
-                
                 if has_sub:
                     escaped_srt = srt_path.replace("\\", "/").replace(":", "\\:")
-                    style = (
-                        f"FontName={SUB_FONT},FontSize={SUB_FONT_SIZE},"
-                        f"PrimaryColour=&HFFFFFF,Bold={SUB_FONT_BOLD},"
-                        f"Outline={SUB_OUTLINE},OutlineColour=&H000000,"
-                        f"MarginV={SUB_OFFSET}"
-                    )
+                    style = f"FontName={SUB_FONT},FontSize={SUB_FONT_SIZE},PrimaryColour=&HFFFFFF,Bold={SUB_FONT_BOLD},Outline={SUB_OUTLINE},OutlineColour=&H000000,MarginV={SUB_OFFSET}"
                     video_chain += f",subtitles='{escaped_srt}':force_style='{style}'"
 
-                command = [
-                    'ffmpeg', '-y', '-i', raw_path,
-                ]
-
-                # Watermark logic
+                command = ['ffmpeg', '-y', '-i', raw_path]
                 if os.path.exists(WATERMARK_PATH):
                     command += ['-i', WATERMARK_PATH]
-                    # Filter complex for watermark + video chain
-                    # [1:v] is watermark. [0:v] is video.
-                    # 1. Scale watermark
-                    # 2. Add opacity
-                    # 3. Overlay on video_chain
-                    filter_complex = (
-                        f"[1:v]scale={WATERMARK_SIZE},format=rgba,colorchannelmixer=aa={WATERMARK_OPACITY}[wm];"
-                        f"[0:v]{video_chain}[vbase];"
-                        f"[vbase][wm]overlay=W-w-20:20[v]"
-                    )
+                    filter_complex = f"[1:v]scale={WATERMARK_SIZE},format=rgba,colorchannelmixer=aa={WATERMARK_OPACITY}[wm];[0:v]{video_chain}[vbase];[vbase][wm]overlay=W-w-20:20[v]"
                     command += ['-filter_complex', filter_complex, '-map', '[v]', '-map', '0:a']
                 else:
                     command += ['-vf', video_chain]
 
-                command += [
-                    '-c:v', 'libx264', '-preset', HARDSUB_PRESET, '-crf', str(HARDSUB_CRF),
-                    '-c:a', 'aac', '-progress', 'pipe:2', dest_path
-                ]
+                command += ['-c:v', 'libx264', '-preset', HARDSUB_PRESET, '-crf', str(HARDSUB_CRF), '-c:a', 'aac', '-progress', 'pipe:2', dest_path]
                 
                 process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
                 
@@ -141,27 +128,23 @@ class Downloader:
                     line = await process.stderr.readline()
                     if not line: break
                     line_str = line.decode().strip()
-                    
                     if progress_callback and "out_time_ms=" in line_str:
                         try:
                             time_ms = int(line_str.split("=")[1])
                             current_sec = time_ms / 1000000
                             if time.time() - last_update > 2:
                                 percent = min(99, (current_sec / total_duration) * 100) if total_duration > 0 else 50
-                                await progress_callback(percent, current_sec, total_duration)
+                                await progress_callback("BURNING", percent)
                                 last_update = time.time()
                         except: pass
 
                 await process.wait()
                 if process.returncode == 0 and os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
-                    # Clean up intermediates
                     if os.path.exists(raw_path): os.remove(raw_path)
                     if os.path.exists(srt_path): os.remove(srt_path)
                     return True
             except Exception as e:
                 logger.error(f"Hardsub/Edit failed: {e}")
-            
-            # Cleanup if failed
             if os.path.exists(raw_path): os.remove(raw_path)
             return False
 
