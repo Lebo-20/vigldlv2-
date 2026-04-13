@@ -81,11 +81,12 @@ class ViglooBot:
             done = int((percent / 100) * blocks)
             return f"|{'■' * done}{'□' * (blocks - done)}| {percent:.1f}%"
 
-        async def update_status(text):
+        async def update_status(text, force=False):
             nonlocal status_msg
             current_time = time.time()
-            # Only update if enough time has passed to avoid Telegram ratelimits
-            if current_time - self.last_status_time < STATUS_UPDATE_INTERVAL:
+            # Only update if enough time has passed to avoid Telegram ratelimits, 
+            # unless it's a forced critical update
+            if not force and current_time - self.last_status_time < STATUS_UPDATE_INTERVAL:
                 return
             
             try:
@@ -122,6 +123,10 @@ class ViglooBot:
                 total_eps = len(episodes)
                 downloaded_files = []
                 
+                # Initial status
+                self.last_status_time = 0 # Reset for new drama
+                await update_status(f"🎬 **{drama_title}**\n🔥 Status: **Starting parallel processing for {total_eps} episodes...**", force=True)
+
                 # 3. Stream & Download (Parallelized for Speed)
                 pipeline_start_time = time.time()
                 episode_progress = {} # Track individual ep progress

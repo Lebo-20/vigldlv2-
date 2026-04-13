@@ -39,8 +39,19 @@ class Downloader:
             for attempt in range(self.retry_count):
                 try:
                     await asyncio.sleep(API_REQUEST_DELAY) # Avoid API spam
-                    cmd = ['ffmpeg', '-y', '-user_agent', user_agent, '-headers', f"Cookie: {cookie_str}\r\n", '-i', m3u8_url, '-c', 'copy', '-bsf:a', 'aac_adtstoasc', raw_path]
-                    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+                    cmd = ['ffmpeg', '-y', '-user_agent', user_agent, '-headers', f"Cookie: {cookie_str}\r\n", '-i', m3u8_url, '-c', 'copy', '-bsf:a', 'aac_adtstoasc', '-progress', 'pipe:2', raw_path]
+                    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+                    
+                    # Periodic notify during raw download (Step 1)
+                    while True:
+                        line = await proc.stderr.readline()
+                        if not line: break
+                        line_str = line.decode().strip()
+                        if progress_callback and "out_time_ms=" in line_str:
+                            # Step 1: 0-30% range based on 'fake' progress since dur might be missing
+                            # We just send a placeholder 15% to show active downloading
+                            await progress_callback(15, 0, 0)
+                    
                     await proc.wait()
                     if proc.returncode == 0 and os.path.exists(raw_path):
                         download_success = True; break

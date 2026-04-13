@@ -29,7 +29,7 @@ DOWNLOAD_DIR = "downloads"
 OUTPUT_DIR = "output"
 MAX_CONCURRENT_DOWNLOADS = 4 # Increased for speed
 API_REQUEST_DELAY = 1.0 # Faster API requests
-STATUS_UPDATE_INTERVAL = 4 # Balanced UI updates
+STATUS_UPDATE_INTERVAL = 3 # More responsive UI updates
 FFMPEG_PRESET = "ultrafast"  # default ultrafast
 FFMPEG_CRF = 23
 
