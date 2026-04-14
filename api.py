@@ -2,7 +2,7 @@ import httpx
 import logging
 import asyncio
 from config import (
-    BASE_URL, API_CODE, LANG, API_REQUEST_DELAY, 
+    BASE_URL, API_TOKEN, LANG, API_REQUEST_DELAY, 
     API_MAX_RETRIES, API_BACKOFF_FACTOR, API_MAX_CONCURRENT_REQUESTS
 )
 
@@ -12,8 +12,11 @@ class ViglooAPI:
     def __init__(self):
         self.base_url = BASE_URL
         self.params = {
-            "lang": LANG,
-            "code": API_CODE
+            "lang": LANG
+        }
+        self.headers = {
+            "Authorization": f"Bearer {API_TOKEN}",
+            "User-Agent": "Vigloo/1.1.0 (com.vigloo.android; build:110; Android 13; Model:SM-G998B)"
         }
         # Limit concurrent API calls to prevent server spam
         self.semaphore = asyncio.Semaphore(API_MAX_CONCURRENT_REQUESTS)
@@ -31,7 +34,11 @@ class ViglooAPI:
                         # Base delay before every request
                         await asyncio.sleep(current_delay)
                         
-                        response = await client.get(f"{self.base_url}{endpoint}", params=params)
+                        response = await client.get(
+                            f"{self.base_url}{endpoint}", 
+                            params=params,
+                            headers=self.headers
+                        )
                         
                         # Handle specific HTTP error cases
                         if response.status_code == 500:
@@ -58,32 +65,31 @@ class ViglooAPI:
                         return None
                 return None
 
-    async def fetch_browse(self, page=1):
+    async def fetch_browse(self, limit=30):
         """Latest Drama"""
-        return await self._get("/api/vigloo/browse", {"page": page})
+        return await self._get("/api/v1/browse", {"limit": limit, "sort": "POPULAR"})
 
     async def fetch_rank(self):
         """Top Ranking Drama"""
-        return await self._get("/api/vigloo/rank")
+        return await self._get("/api/v1/rank")
 
-    async def search(self, query):
+    async def search(self, query, limit=20):
         """Search Drama"""
-        return await self._get("/api/vigloo/search", {"q": query})
+        return await self._get("/api/v1/search", {"q": query, "limit": limit})
 
     async def get_drama_detail(self, drama_id):
         """Detail Drama"""
-        return await self._get(f"/api/vigloo/drama/{drama_id}")
+        return await self._get(f"/api/v1/drama/{drama_id}")
 
     async def get_episodes(self, drama_id, season_id):
         """Episode List (per season)"""
-        return await self._get(f"/api/vigloo/drama/{drama_id}/season/{season_id}/episodes")
+        return await self._get(f"/api/v1/drama/{drama_id}/season/{season_id}/episodes")
 
-    async def get_stream(self, season_id, ep, video_id):
+    async def get_stream(self, season_id, ep):
         """Stream Video Link"""
-        return await self._get("/api/vigloo/getstream", {
+        return await self._get("/api/v1/play", {
             "seasonId": season_id,
-            "ep": ep,
-            "videoId": video_id
+            "ep": ep
         })
 
 # Singleton instance

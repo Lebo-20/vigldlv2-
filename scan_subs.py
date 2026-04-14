@@ -3,21 +3,21 @@ import httpx
 import json
 
 async def find_subs():
-    base_url = "https://drakula.dramabos.my.id"
+    base_url = "https://captain.sapimu.au/vigloo"
     # Drama ID: 15001590 (Omniscient Evolution)
     # Season ID: 15001557
     params = {
-        "lang": "id",
-        "code": "A8D6AB170F7B89F2182561D3B32F390D"
+        "lang": "id"
     }
     
     headers = {
+        "Authorization": "Bearer 5cf419a4c7fb1c8585314b9f797bf77e7b10a705f32c91aac65b901559780e12",
         "User-Agent": "Vigloo/1.1.0 (com.vigloo.android; build:110; Android 13; Model:SM-G998B)"
     }
 
     endpoints = [
-        f"/api/vigloo/drama/15001590/season/15001557/episodes",
-        f"/api/vigloo/getstream?seasonId=15001557&ep=1&videoId=15026732"
+        f"/api/v1/drama/15001590/season/15001557/episodes",
+        f"/api/v1/play?seasonId=15001557&ep=1"
     ]
 
     async with httpx.AsyncClient(headers=headers) as client:

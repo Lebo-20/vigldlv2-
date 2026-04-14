@@ -2,8 +2,11 @@ import asyncio
 import httpx
 
 async def check():
-    url = "https://drakula.dramabos.my.id/api/vigloo/getstream?lang=id&code=A8D6AB170F7B89F2182561D3B32F390D&seasonId=15001024&ep=1&videoId=15022079"
-    async with httpx.AsyncClient() as client:
+    url = "https://captain.sapimu.au/vigloo/api/v1/play?lang=id&seasonId=15001024&ep=1"
+    headers = {
+        "Authorization": "Bearer 5cf419a4c7fb1c8585314b9f797bf77e7b10a705f32c91aac65b901559780e12"
+    }
+    async with httpx.AsyncClient(headers=headers) as client:
         r = await client.get(url)
         data = r.json()
         m3u8 = data.get("url")

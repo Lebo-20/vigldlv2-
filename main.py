@@ -1,141 +1,143 @@
 import os
-import logging
-import shutil
 import time
-import asyncio
 import json
+import logging
+import asyncio
+import shutil
+from datetime import datetime
 from telethon import events
-from config import *
+
 from api import vigloo_api
 from downloader import downloader
 from merge import merger
 from uploader import uploader
+from gsheets import gsheet_manager
+from config import *
 
 # Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("bot.log"),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
-PROCESSED_FILE = 'processed.json'
+def get_bar(percent):
+    length = 20
+    filled = int(length * percent / 100)
+    return "█" * filled + "░" * (length - filled) + f" {percent:.1f}%"
 
 class ViglooBot:
     def __init__(self):
+        self.processed_file = PROCESSED_FILE
         self.processed_data = self._load_processed()
         self.auto_mode = True
+        self.session_failed = set()
+        self.priority_queue = asyncio.Queue() # Queue for manual ID/Search tasks
         self.lock = asyncio.Lock()  # Ensure only one drama processed at a time
         self.last_status_time = 0
-        self._check_lock()
-
-    def _check_lock(self):
-        """Prevent multiple instances of the bot from running"""
-        lock_file = "bot.lock"
-        if os.path.exists(lock_file):
-            try:
-                # On Windows, we can use try-except to check if file is held by another process
-                with open(lock_file, "w") as f:
-                    f.write(str(os.getpid()))
-            except IOError:
-                print("❌ ERROR: Another instance of the bot is already running!")
-                os._exit(1)
-        else:
-            with open(lock_file, "w") as f:
-                f.write(str(os.getpid()))
-            
-        import atexit
-        def cleanup():
-            if os.path.exists(lock_file):
-                try: os.remove(lock_file)
-                except: pass
-        atexit.register(cleanup)
+        self.failed_counts = {}
 
     def _load_processed(self):
-        if os.path.exists(PROCESSED_FILE):
+        if os.path.exists(self.processed_file):
             try:
-                with open(PROCESSED_FILE, 'r') as f:
-                    return json.load(f)
-            except:
-                return {"dramas": []}
-        return {"dramas": []}
-
-    def _save_processed(self):
-        with open(PROCESSED_FILE, 'w') as f:
-            json.dump(self.processed_data, f, indent=4)
-
-    def is_processed(self, drama_id):
-        return str(drama_id) in self.processed_data.get("dramas", [])
+                with open(self.processed_file, 'r') as f:
+                    return set(json.load(f))
+            except: return set()
+        return set()
 
     def mark_processed(self, drama_id):
-        if not self.is_processed(drama_id):
-            self.processed_data["dramas"].append(str(drama_id))
-            self._save_processed()
+        self.processed_data.add(drama_id)
+        with open(self.processed_file, 'w') as f:
+            json.dump(list(self.processed_data), f)
 
-    async def run_pipeline(self, drama_id, chat_id=None, topic_id=None):
-        """Pipeline with CLEAN DASHBOARD (Only during active processing)"""
-        if chat_id is None:
-            chat_id = AUTO_CHANNEL if AUTO_CHANNEL != 0 else ADMIN_ID
-            
-        logger.info(f"Starting pipeline for Drama ID: {drama_id}")
+    def is_processed(self, drama_id):
+        return drama_id in self.processed_data
+
+    async def run_pipeline(self, drama_id, chat_id=AUTO_CHANNEL, topic_id=TOPIC_ID):
+        """Processes one drama end-to-end"""
         status_msg = None
-
-        def get_bar(percent):
-            blocks = 20
-            done = int((percent / 100) * blocks)
-            return f"|{'■' * done}{'□' * (blocks - done)}| {percent:.1f}%"
-
+        temp_dir = os.path.join(DOWNLOAD_DIR, str(drama_id))
+        
         async def update_status(text, force=False):
             nonlocal status_msg
-            current_time = time.time()
-            # Only update if enough time has passed to avoid Telegram ratelimits, 
-            # unless it's a forced critical update
-            if not force and current_time - self.last_status_time < STATUS_UPDATE_INTERVAL:
+            now = time.time()
+            if not force and now - self.last_status_time < STATUS_UPDATE_INTERVAL:
                 return
-            
+            self.last_status_time = now
             try:
-                if status_msg is None:
-                    status_msg = await uploader.client.send_message(chat_id, text, reply_to=topic_id)
+                if status_msg:
+                    await status_msg.edit(text)
                 else:
-                    await uploader.client.edit_message(chat_id, status_msg, text)
-                self.last_status_time = current_time
+                    status_msg = await uploader.client.send_message(chat_id, text, reply_to=topic_id)
             except Exception as e:
-                logger.debug(f"Status update failed: {e}")
+                logger.error(f"Status update failed: {e}")
 
         try:
             # 1. Scraping Detail
             await asyncio.sleep(API_REQUEST_DELAY)
             res = await vigloo_api.get_drama_detail(drama_id)
-            if not res or not res.get("success"): return False
+            if not res: return False
             
-            detail = res.get("data", {}).get("payload", {})
+            detail = res.get("drama") or res.get("payload") or res.get("data", {}).get("payload", {})
+            if not detail: return False
+            
             drama_title = detail.get("title", f"Drama_{drama_id}")
+            
+            # GSheet Check: Skip if already in Spreadsheet
+            exist = gsheet_manager.find_drama(drama_title)
+            if exist:
+                logger.info(f"Drama {drama_title} already in Spreadsheet. Skipping.")
+                return True
+            
+            drama_desc = detail.get("description", "No description available.")
+            genres_list = detail.get("genres", [])
+            genre_names = ", ".join([g.get("title") for g in genres_list]) if isinstance(genres_list, list) else "Drama"
+            poster_url = detail.get("thumbnailExpanded") or detail.get("thumbnail") or detail.get("thumbnails", [{}])[0].get("url")
+            
             seasons = detail.get("seasons", [])
             if not seasons: return False
 
-            temp_dir = os.path.join(DOWNLOAD_DIR, str(drama_id))
-            os.makedirs(temp_dir, exist_ok=True)
-
+            # We usually process Season 1 unless logic needs more
             for season in seasons:
                 season_id = season.get("id")
                 season_num = season.get("seasonNumber", 1)
                 await asyncio.sleep(API_REQUEST_DELAY)
                 res_eps = await vigloo_api.get_episodes(drama_id, season_id)
-                if not res_eps or not res_eps.get("success"): continue
+                if not res_eps: continue
                 
-                episodes = res_eps.get("data", {}).get("payloads", [])
+                episodes = res_eps.get("payloads") or res_eps.get("data", {}).get("payloads", [])
                 total_eps = len(episodes)
                 downloaded_files = []
                 
+                if total_eps == 0: continue
+                
+                os.makedirs(temp_dir, exist_ok=True)
+                episode_progress = {} # idx -> percent
+                
                 # Initial status
                 self.last_status_time = 0 # Reset for new drama
-                await update_status(f"🎬 **{drama_title}**\n🔥 Status: **Starting parallel processing for {total_eps} episodes...**", force=True)
+                await update_status(f"🎬 **[vigloo] Full Episode**: {drama_title}\n🔥 Status: **Memulai proses {total_eps} episode...**", force=True)
 
                 # 3. Stream & Download (Parallelized for Speed)
                 pipeline_start_time = time.time()
-                episode_progress = {} # Track individual ep progress
                 
                 async def process_one_episode(idx, ep):
                     ep_num = ep.get("episodeNumber")
-                    video_id = ep.get("id")
-                    stream_res = await vigloo_api.get_stream(season_id, ep_num, video_id)
-                    if not stream_res or not stream_res.get("success"):
+                    stream_res = await vigloo_api.get_stream(season_id, ep_num)
+                    if not stream_res:
+                        return None
+                    
+                    # New API: stream info is in 'payload' or 'source' (if dict)
+                    stream_info = stream_res.get("payload")
+                    if not isinstance(stream_info, dict):
+                        stream_info = stream_res.get("source")
+                    
+                    if not isinstance(stream_info, dict) or not stream_info.get("url"):
+                        logger.error(f"❌ Episode {ep_num} failed: Locked Content or Paywall.")
                         return None
                     
                     file_path = os.path.join(temp_dir, f"S{season_num}E{ep_num}.mp4")
@@ -154,20 +156,21 @@ class ViglooBot:
                         else:
                             eta_str = "Calculating..."
 
-                        active_ep = max(episode_progress.keys()) if episode_progress else idx
                         dashboard = (
-                            f"🎬 **{drama_title}**\n"
-                            f"🔥 Status: **Parallel Processing ({total_eps} Eps)...**\n"
+                            f"🎬 **[vigloo] Full Episode**: {drama_title}\n"
+                            f"🔥 Status: **Processing ({total_eps} Eps)...**\n"
                             f"🎞 Progress: `{get_bar(total_percent)}`\n"
                             f"⏳ Estimasi: `{eta_str}`"
                         )
                         await update_status(dashboard)
 
-                    success = await downloader.download_file(stream_res, file_path, progress_cb)
-                    if success:
-                        episode_progress[idx] = 100
-                        return file_path
-                    return None
+                    success = await downloader.download_file(stream_info, file_path, progress_cb)
+                    if not success:
+                        logger.error(f"❌ Episode {ep_num} failed during download/burn.")
+                        return None
+                    
+                    episode_progress[idx] = 100
+                    return file_path
 
                 tasks = []
                 for i, ep in enumerate(episodes, 1):
@@ -189,13 +192,30 @@ class ViglooBot:
                 output_filename = f"{drama_title} - Season {season_num}.mp4"
                 output_path = os.path.join(OUTPUT_DIR, output_filename)
                 if merger.merge_videos(downloaded_files, output_path):
-                    # 5. Upload
+                    # 5. Send Poster & Info Before Video
+                    info_caption = (
+                        f"🎬 **{drama_title}**\n\n"
+                        f"🎭 **Genre**: {genre_names}\n"
+                        f"📝 **Sinopsis**: {drama_desc[:800]}{'...' if len(drama_desc) > 800 else ''}\n\n"
+                        f"#Vigloo #Drama #EpisodeFull"
+                    )
+                    try:
+                        if poster_url:
+                            await uploader.client.send_file(chat_id, poster_url, caption=info_caption, reply_to=topic_id)
+                        else:
+                            await uploader.client.send_message(chat_id, info_caption, reply_to=topic_id)
+                    except: pass
+
+                    # 6. Upload Video
                     async def upload_cb(sent_bytes, total_bytes):
                         pct = (sent_bytes / total_bytes) * 100
                         await update_status(f"🎬 **{drama_title}**\n🔥 Status: **Uploading...**\n`{get_bar(pct)}`")
 
-                    caption = f"🎬 **{drama_title}**\n\nSeason: {season_num}\n#Vigloo #Drama"
-                    await uploader.upload_video(chat_id, output_path, caption, topic_id, progress_callback=upload_cb)
+                    video_caption = f"[vigloo] Full Episode {drama_title}"
+                    await uploader.upload_video(chat_id, output_path, video_caption, topic_id, progress_callback=upload_cb)
+                    
+                    # Log to GSheet
+                    gsheet_manager.log_drama(drama_title, "SUCCESS", f"S{season_num} Full Movie Uploaded")
                     
                     # Delete dashboard message after success
                     if status_msg: await uploader.client.delete_messages(chat_id, status_msg)
@@ -203,6 +223,9 @@ class ViglooBot:
 
             self.mark_processed(drama_id)
             return True
+        except Exception as e:
+            logger.error(f"Pipeline error for {drama_id}: {e}")
+            return False
         finally:
             if status_msg: 
                 try: await uploader.client.delete_messages(chat_id, status_msg)
@@ -210,126 +233,95 @@ class ViglooBot:
             if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 
     async def auto_scan_task(self):
-        """Background task for auto mode with concurrency lock and 4h timeout"""
-        if not hasattr(self, 'failed_counts'): self.failed_counts = {}
-        
-        while True:
-            if self.auto_mode:
-                logger.info("Starting Auto Scan...")
-                session_failed = set() # Titles that failed in this specific scan loop
-                
-                # Scan Ranking
-                rank_data = await vigloo_api.fetch_rank()
-                if rank_data and rank_data.get("success"):
-                    payloads = rank_data.get("data", {}).get("payloads", [])
-                    for item in payloads:
-                        drama_id = item.get("program", {}).get("id")
-                        if drama_id and not self.is_processed(drama_id) and drama_id not in session_failed:
-                            # Skip if it failed too many times total
-                            if self.failed_counts.get(drama_id, 0) >= 3:
-                                logger.warning(f"Skipping drama {drama_id} - too many failed attempts.")
-                                continue
-                                
-                            async with self.lock:
-                                try:
-                                    logger.info(f"Processing drama {drama_id} (Rank)...")
-                                    success = await asyncio.wait_for(self.run_pipeline(drama_id), timeout=4*3600)
-                                    if success:
-                                        await asyncio.sleep(10) # Cooldown
-                                    else:
-                                        session_failed.add(drama_id)
-                                        self.failed_counts[drama_id] = self.failed_counts.get(drama_id, 0) + 1
-                                        await asyncio.sleep(30) # Cool down after failure
-                                except Exception as e:
-                                    logger.error(f"Pipeline failed for {drama_id}: {e}")
-                                    session_failed.add(drama_id)
-                                    self.failed_counts[drama_id] = self.failed_counts.get(drama_id, 0) + 1
-                                    await asyncio.sleep(30)
-                
-                # Scan Browse
-                browse_data = await vigloo_api.fetch_browse()
-                if browse_data and browse_data.get("success"):
-                    payloads = browse_data.get("data", {}).get("payloads", [])
-                    for item in payloads:
-                        drama_id = item.get("program", {}).get("id")
-                        if drama_id and not self.is_processed(drama_id) and drama_id not in session_failed:
-                            # Skip if too many failures
-                            if self.failed_counts.get(drama_id, 0) >= 3:
-                                logger.warning(f"Skipping drama {drama_id} - too many failed attempts.")
-                                continue
-                                
-                            async with self.lock:
-                                try:
-                                    logger.info(f"Processing drama {drama_id} (Browse)...")
-                                    success = await asyncio.wait_for(self.run_pipeline(drama_id), timeout=4*3600)
-                                    if success:
-                                        await asyncio.sleep(10) # Cooldown
-                                    else:
-                                        session_failed.add(drama_id)
-                                        self.failed_counts[drama_id] = self.failed_counts.get(drama_id, 0) + 1
-                                        await asyncio.sleep(30)
-                                except Exception as e:
-                                    logger.error(f"Pipeline failed for {drama_id}: {e}")
-                                    session_failed.add(drama_id)
-                                    self.failed_counts[drama_id] = self.failed_counts.get(drama_id, 0) + 1
-                                    await asyncio.sleep(30)
-                
-            await asyncio.sleep(AUTO_SCAN_INTERVAL)
-
-    async def start(self):
+        """Background task for auto mode with priority queue and auto-scanning"""
+        logger.info("Starting Vigloo Automation Bot...")
         await uploader.start()
         
-        # Bot commands interface
-        @uploader.client.on(events.NewMessage(pattern='/start'))
-        async def handler(event):
-            await event.respond('Vigloo Automation Bot is Ready!')
+        # Command Listeners
+        @uploader.client.on(events.NewMessage(pattern='/add (\\d+)'))
+        async def add_handler(event):
+            if event.sender_id != int(ADMIN_ID): return
+            drama_id = event.pattern_match.group(1)
+            await self.priority_queue.put(('id', drama_id, event.chat_id, event.message.reply_to_msg_id))
+            await event.reply(f"✅ Drama ID {drama_id} ditambahkan ke antrian priority!")
 
-        @uploader.client.on(events.NewMessage(pattern='/status'))
-        async def status_handler(event):
-            # Convert to int for comparison
-            if event.sender_id != int(ADMIN_ID):
-                return
-            
-            status = "Auto Mode: ON" if self.auto_mode else "Auto Mode: OFF"
-            if self.lock.locked():
-                status += "\n🔥 Currently processing a drama..."
-            await event.respond(status)
+        @uploader.client.on(events.NewMessage(pattern='/search (.+)'))
+        async def search_handler(event):
+            if event.sender_id != int(ADMIN_ID): return
+            query = event.pattern_match.group(1)
+            await self.priority_queue.put(('search', query, event.chat_id, event.message.reply_to_msg_id))
+            await event.reply(f"🔍 Mencari dan menambahkan drama '{query}' ke antrian priority...")
 
-        @uploader.client.on(events.NewMessage(pattern='/update'))
-        async def update_handler(event):
-            if event.sender_id != int(ADMIN_ID):
-                return await event.respond("❌ Only Admin can update the bot.")
-            
-            await event.respond("🔄 **Updating bot...** pulling latest code from GitHub.")
+        while True:
             try:
-                import subprocess
-                import sys
-                # 1. Git Pull
-                process = subprocess.run(["git", "pull", "origin", "main"], capture_output=True, text=True)
-                if process.returncode != 0:
-                    return await event.respond(f"❌ **Git Pull Failed:**\n`{process.stderr}`")
+                # 1. Process Priority Queue
+                while not self.priority_queue.empty():
+                    task_type, payload, chat_id, topic_id = await self.priority_queue.get()
+                    logger.info(f"Processing priority task: {task_type} -> {payload}")
+                    
+                    async with self.lock:
+                        if task_type == 'id':
+                            await self.run_pipeline(payload, chat_id, topic_id)
+                        elif task_type == 'search':
+                            search_res = await vigloo_api.search(payload)
+                            payloads = search_res.get("payloads") or search_res.get("data", {}).get("payloads", [])
+                            if payloads:
+                                first_item = payloads[0]
+                                drama = first_item.get("program") if first_item.get("program") else first_item
+                                await self.run_pipeline(drama.get("id"), chat_id, topic_id)
+                            else:
+                                await uploader.client.send_message(chat_id, f"❌ Drama '{payload}' tidak ditemukan.")
+                    
+                    self.priority_queue.task_done()
+                    await asyncio.sleep(5)
+
+                # 2. Auto Scan
+                logger.info("Scanning Ranking & Browse...")
+                session_failed = set()
                 
-                await event.respond("✅ **Code updated!** Cleaning session and restarting bot... 🚀")
+                # Fetch Ranking
+                rank_data = await vigloo_api.fetch_rank()
+                # Combined payloads from Rank and Browse
+                all_drama_ids = []
                 
-                # 2. Cleanup & Restart
-                await uploader.client.disconnect()
+                if rank_data:
+                    ps = rank_data.get("payloads") or rank_data.get("data", {}).get("payloads", [])
+                    for p in ps:
+                        d_id = p.get("program", {}).get("id")
+                        if d_id and not self.is_processed(d_id): all_drama_ids.append(d_id)
                 
-                # Remove session files for a clean start
-                import glob
-                for f in glob.glob("*.session"):
-                    try: os.remove(f)
-                    except: pass
-                
-                os.execv(sys.executable, ['python'] + sys.argv)
+                # Fetch Browse
+                browse_data = await vigloo_api.fetch_browse()
+                if browse_data:
+                    ps = browse_data.get("payloads") or browse_data.get("data", {}).get("payloads", [])
+                    for p in ps:
+                        d_id = p.get("program", {}).get("id")
+                        if d_id and not self.is_processed(d_id): all_drama_ids.append(d_id)
+
+                # Process auto-scanned dramas
+                for drama_id in all_drama_ids:
+                    # Check Priority Queue again inside the loop for responsiveness
+                    if not self.priority_queue.empty(): break
+                    
+                    if self.failed_counts.get(drama_id, 0) >= 3: continue
+                    
+                    async with self.lock:
+                        try:
+                            logger.info(f"Auto-processing drama {drama_id}...")
+                            success = await asyncio.wait_for(self.run_pipeline(drama_id), timeout=4*3600)
+                            if not success:
+                                self.failed_counts[drama_id] = self.failed_counts.get(drama_id, 0) + 1
+                            await asyncio.sleep(60) # Cooldown between automated dramas
+                        except Exception as e:
+                            logger.error(f"Auto-pipeline failed for {drama_id}: {e}")
+                            self.failed_counts[drama_id] = self.failed_counts.get(drama_id, 0) + 1
+
+                logger.info(f"Auto-scan finished. Sleeping for {AUTO_SCAN_INTERVAL}s...")
+                await asyncio.sleep(AUTO_SCAN_INTERVAL)
             except Exception as e:
-                await event.respond(f"❌ **Update Error:** {e}")
+                logger.error(f"Main loop error: {e}")
+                await asyncio.sleep(60)
 
-        logger.info("Bot logic started...")
-        await asyncio.gather(
-            uploader.client.run_until_disconnected(),
-            self.auto_scan_task()
-        )
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     bot = ViglooBot()
-    asyncio.run(bot.start())
+    asyncio.run(bot.auto_scan_task())

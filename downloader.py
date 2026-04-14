@@ -6,7 +6,8 @@ import time
 from config import (
     MAX_CONCURRENT_DOWNLOADS, HARDSUB_MAX_RES, HARDSUB_PRESET, 
     HARDSUB_CRF, SUB_FONT, SUB_FONT_SIZE, SUB_FONT_BOLD, 
-    SUB_OUTLINE, SUB_OFFSET, WATERMARK_PATH, WATERMARK_SIZE, WATERMARK_OPACITY
+    SUB_OUTLINE, SUB_OFFSET, WATERMARK_PATH, WATERMARK_SIZE, 
+    WATERMARK_OPACITY, API_TOKEN
 )
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,11 @@ class Downloader:
 
             cookie_str = "; ".join([f"{k}={v}" for k, v in cookies_dict.items()])
             user_agent = "Vigloo/1.1.0 (com.vigloo.android; build:110; Android 13; Model:SM-G998B)"
+            headers = {
+                "User-Agent": user_agent,
+                "Authorization": f"Bearer {API_TOKEN}",
+                "Cookie": cookie_str
+            }
             
             raw_path = dest_path + ".raw.mp4"
             srt_path = dest_path.replace(".mp4", ".srt")
@@ -43,9 +49,12 @@ class Downloader:
                     if ENABLE_ARIA2:
                         logger.info(f"Using aria2c for parallel download...")
                         # 1. Fetch m3u8 content
-                        async with httpx.AsyncClient(headers={"User-Agent": user_agent}) as client:
-                            r = await client.get(m3u8_url, cookies=cookies_dict, timeout=10.0)
-                            if r.status_code != 200: raise Exception("Failed to fetch m3u8")
+                        async with httpx.AsyncClient(headers=headers) as client:
+                            r = await client.get(m3u8_url, timeout=10.0)
+                            if r.status_code == 403:
+                                logger.error("❌ 403 Forbidden: Token does not have access to this episode.")
+                                return False
+                            if r.status_code != 200: raise Exception(f"HTTP {r.status_code}")
                             m3u8_content = r.text
                         
                         # 2. Extract segments
@@ -92,7 +101,7 @@ class Downloader:
                                 download_success = True; break
                     
                     # Fallback to FFmpeg if aria2c disabled or failed
-                    cmd = ['ffmpeg', '-y', '-user_agent', user_agent, '-headers', f"Cookie: {cookie_str}\r\n", '-i', m3u8_url, '-c', 'copy', '-bsf:a', 'aac_adtstoasc', '-progress', 'pipe:2', raw_path]
+                    cmd = ['ffmpeg', '-y', '-user_agent', user_agent, '-headers', f"Authorization: Bearer {API_TOKEN}\r\nCookie: {cookie_str}\r\n", '-i', m3u8_url, '-c', 'copy', '-bsf:a', 'aac_adtstoasc', '-progress', 'pipe:2', raw_path]
                     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
                     
                     while True:

@@ -17,11 +17,17 @@ API_ID = get_int_env("API_ID")
 API_HASH = os.getenv("API_HASH", "").strip()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_ID = get_int_env("ADMIN_ID")
-AUTO_CHANNEL = get_int_env("AUTO_CHANNEL")
+AUTO_CHANNEL = -1003857149032
+TOPIC_ID = 3931
+
+# GSheet Config
+GSHEET_ID = "1lRZrBO9YOnzxdjSfcCmrQzKr-aQKDnMd2vD-x90qRj4"
+GSHEET_CREDENTIALS = "bot-downloader-493221-8f7ba339f423.json"
+BOT_IDENTITY = "VIGLOO_BOT"
 
 # Vigloo API Config
 BASE_URL = os.getenv("BASE_URL", "https://api.iltv.my.id") # Default if not specified
-API_CODE = "A8D6AB170F7B89F2182561D3B32F390D"
+API_TOKEN = "5cf419a4c7fb1c8585314b9f797bf77e7b10a705f32c91aac65b901559780e12"
 LANG = "id"
 
 # Download & Merge Config
