@@ -12,6 +12,7 @@ from downloader import downloader
 from merge import merger
 from uploader import uploader
 from gsheets import gsheet_manager
+from database import db
 from config import *
 
 # Setup logging
@@ -87,10 +88,17 @@ class ViglooBot:
             
             drama_title = detail.get("title", f"Drama_{drama_id}")
             
+            # Database Check: Skip if title already in PostgreSQL
+            if db.is_title_processed(drama_title):
+                logger.info(f"Drama {drama_title} already in PostgreSQL. Skipping.")
+                return True
+
             # GSheet Check: Skip if already in Spreadsheet
             exist = gsheet_manager.find_drama(drama_title)
             if exist:
                 logger.info(f"Drama {drama_title} already in Spreadsheet. Skipping.")
+                # Also mark it in Database to sync
+                db.mark_title_processed(drama_title, drama_id)
                 return True
             
             drama_desc = detail.get("description", "No description available.")
@@ -217,6 +225,9 @@ class ViglooBot:
                     # Log to GSheet
                     gsheet_manager.log_drama(drama_title, "SUCCESS", f"S{season_num} Full Movie Uploaded")
                     
+                    # Log to Database
+                    db.mark_title_processed(drama_title, drama_id)
+
                     # Delete dashboard message after success
                     if status_msg: await uploader.client.delete_messages(chat_id, status_msg)
                     if os.path.exists(output_path): os.remove(output_path)
