@@ -57,6 +57,7 @@ AUTO_SCAN_INTERVAL = 15 * 60  # Back to 15 minutes for faster scanning
 EPISODE_COOLDOWN = 10 # Delay between processing different episodes (seconds)
 ENABLE_ARIA2 = True # Use aria2c for parallel segment downloading
 PROCESSED_FILE = "processed.json"
+UPLOAD_SUCCESS_COOLDOWN = 600 # 10 minutes rest after successful upload
 
 # Watermark Config (Optional)
 WATERMARK_PATH = "logo.png" # Place logo.png in the root or change path

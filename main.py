@@ -91,7 +91,7 @@ class ViglooBot:
             # Database Check: Skip if title already in PostgreSQL
             if db.is_title_processed(drama_title):
                 logger.info(f"Drama {drama_title} already in PostgreSQL. Skipping.")
-                return True
+                return "SKIPPED"
 
             # GSheet Check: Skip if already in Spreadsheet
             exist = gsheet_manager.find_drama(drama_title)
@@ -99,7 +99,7 @@ class ViglooBot:
                 logger.info(f"Drama {drama_title} already in Spreadsheet. Skipping.")
                 # Also mark it in Database to sync
                 db.mark_title_processed(drama_title, drama_id)
-                return True
+                return "SKIPPED"
             
             drama_desc = detail.get("description", "No description available.")
             genres_list = detail.get("genres", [])
@@ -319,13 +319,20 @@ class ViglooBot:
                     async with self.lock:
                         try:
                             logger.info(f"Auto-processing drama {drama_id}...")
-                            success = await asyncio.wait_for(self.run_pipeline(drama_id), timeout=4*3600)
-                            if not success:
+                            result = await asyncio.wait_for(self.run_pipeline(drama_id), timeout=4*3600)
+                            
+                            if result is True:
+                                logger.info(f"Upload success. Resting for {UPLOAD_SUCCESS_COOLDOWN}s...")
+                                await asyncio.sleep(UPLOAD_SUCCESS_COOLDOWN)
+                            elif result == "SKIPPED":
+                                await asyncio.sleep(5) # Short delay for skipped
+                            else:
                                 self.failed_counts[drama_id] = self.failed_counts.get(drama_id, 0) + 1
-                            await asyncio.sleep(60) # Cooldown between automated dramas
+                                await asyncio.sleep(60)
                         except Exception as e:
                             logger.error(f"Auto-pipeline failed for {drama_id}: {e}")
                             self.failed_counts[drama_id] = self.failed_counts.get(drama_id, 0) + 1
+                            await asyncio.sleep(60)
 
                 logger.info(f"Auto-scan finished. Sleeping for {AUTO_SCAN_INTERVAL}s...")
                 await asyncio.sleep(AUTO_SCAN_INTERVAL)
